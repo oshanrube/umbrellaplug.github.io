@@ -4,6 +4,7 @@ from sys import argv, exit as sysexit
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from resources.lib.modules import control
 from resources.lib.modules import log_utils
+from resources.lib.modules import resolve_tracker
 from resources.lib.modules import string_tools
 from resources.lib.modules.source_utils import supported_video_extensions
 
@@ -82,18 +83,30 @@ class Offcloud:
 		try:
 			extensions = supported_video_extensions()
 			extras_filtering_list = extras_filter()
+			resolve_tracker.report('Checking Offcloud cache')
 			match = info_hash.lower() in self.check_cache([info_hash]).get('cachedItems', [])
-			if not match: return None
+			if not match:
+				resolve_tracker.fail('Not cached on Offcloud')
+				return None
+			resolve_tracker.report('Requesting file list from Offcloud')
 			files = self._POST(self.cache_download, data={'url': magnet_url})
-			if not isinstance(files, list) or not files: return None
+			if not isinstance(files, list) or not files:
+				resolve_tracker.fail('Offcloud returned no files')
+				return None
 			selected = [f for f in files if f.get('filename', '').lower().endswith(tuple(extensions))]
-			if not selected: return None
+			if not selected:
+				resolve_tracker.fail('No video files in torrent')
+				return None
 			if season:
 				selected = [f for f in selected if seas_ep_filter(season, episode, f['filename'])]
 			else:
-				if self._m2ts_check(selected): raise Exception('_m2ts_check failed')
+				if self._m2ts_check(selected):
+					resolve_tracker.fail('Blu-ray disc structure (.m2ts) is not playable')
+					raise Exception('_m2ts_check failed')
 				selected = [f for f in selected if not any(x in f['filename'] for x in extras_filtering_list)]
-			if not selected: return None
+			if not selected:
+				resolve_tracker.fail('No file for season %s episode %s in torrent' % (season, episode) if season else 'Only extras/samples in torrent')
+				return None
 			return selected[0]['url']
 		except:
 			log_utils.error('Offcloud: Error RESOLVE MAGNET "%s"' % magnet_url)

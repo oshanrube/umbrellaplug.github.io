@@ -5,6 +5,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import urlencode
 from resources.lib.modules import control
 from resources.lib.modules import log_utils
+from resources.lib.modules import resolve_tracker
 from resources.lib.modules import string_tools
 from resources.lib.modules.source_utils import supported_video_extensions
 
@@ -163,32 +164,47 @@ class TorBox:
 
 	def resolve_magnet(self, magnet_url, info_hash, season, episode, title):
 		from resources.lib.modules.source_utils import seas_ep_filter, extras_filter
+		torrent_id = None
 		try:
 			file_url, match = None, False
 			extensions = supported_video_extensions()
 			extras_filtering_list = tuple(i for i in extras_filter() if not i in title.lower())
+			resolve_tracker.report('Checking TorBox cache')
 			check = self.check_cache_single(info_hash)
 			match = info_hash.lower() in [i['hash'].lower() for i in check['data']]
-			if not match: return None
+			if not match:
+				resolve_tracker.fail('Not cached on TorBox')
+				return None
+			resolve_tracker.report('Adding torrent to TorBox')
 			torrent = self.add_magnet(magnet_url)
-			if not torrent['success']: return None
+			if not torrent['success']:
+				resolve_tracker.fail('TorBox rejected the torrent: %s' % (torrent.get('detail') or torrent.get('error') or 'unknown'))
+				return None
 			torrent_id = torrent['data']['torrent_id']
+			resolve_tracker.report('Reading file list from TorBox')
 			torrent_files = self.torrent_info(torrent_id)
 			selected_files = [
 				{'link': '%d,%d' % (torrent_id, i['id']), 'filename': i['short_name'], 'size': i['size']}
 				for i in torrent_files['data']['files'] if i['short_name'].lower().endswith(tuple(extensions))
 			]
-			if not selected_files: return None
+			if not selected_files:
+				resolve_tracker.fail('No video files in torrent')
+				return None
 			if season:
 				selected_files = [i for i in selected_files if seas_ep_filter(season, episode, i['filename'])]
 			else:
-				if self._m2ts_check(selected_files): raise Exception('_m2ts_check failed')
+				if self._m2ts_check(selected_files):
+					resolve_tracker.fail('Blu-ray disc structure (.m2ts) is not playable')
+					raise Exception('_m2ts_check failed')
 				selected_files = [i for i in selected_files if not any(x in i['filename'] for x in extras_filtering_list)]
 				selected_files.sort(key=lambda k: k['size'], reverse=True)
-			if not selected_files: return None
+			if not selected_files:
+				resolve_tracker.fail('No file for season %s episode %s in torrent' % (season, episode) if season else 'Only extras/samples in torrent')
+				return None
 			file_key = selected_files[0]['link']
-			
+			resolve_tracker.report('Requesting TorBox download link')
 			file_url = self.unrestrict_link(file_key)
+			if not file_url: resolve_tracker.fail('TorBox failed to create a download link')
 			if not self.store_to_cloud: Thread(target=self.delete_torrent, args=(torrent_id,)).start()
 			return file_url
 		except Exception as e:
