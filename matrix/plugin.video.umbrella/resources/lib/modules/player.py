@@ -511,6 +511,10 @@ class Player(xbmc.Player):
 			if self.onPlayBackStopped_ran:
 				return
 			xbmc.sleep(200)
+		else: # playback never started: close the kept-alive progress window now and say so, instead of leaving it frozen
+			homeWindow.clearProperty('umbrella.window_keep_alive')
+			log_utils.log('Playback did not start within 100s for %s' % self.name, level=log_utils.LOGWARNING)
+			control.notification(title=self.name, message='Playback did not start - Kodi could not open the stream (see kodi.log)')
 
 		xbmc.sleep(5000)
 		playlist_skip = False
@@ -1680,6 +1684,9 @@ class Bookmarks:
 		label = '%02d:%02d:%02d' % (hours, minutes, seconds)
 		label = getLS(32502) % label
 		if getSetting('bookmarks.auto') == 'false':
+			if homeWindow.getProperty('umbrella.window_keep_alive') == 'true': # the source progress window would sit on top of the prompt
+				homeWindow.clearProperty('umbrella.window_keep_alive')
+				control.sleep(400) # window_monitor polls every 200ms
 			select = control.yesnocustomDialog(label, scrobbble, '', str(name), 'Cancel Playback', getLS(32503), getLS(32501))
 			if select == 1: offset = '0'
 			elif select == -1 or select == 2: offset = '-1'

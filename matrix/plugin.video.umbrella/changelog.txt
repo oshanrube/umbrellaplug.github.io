@@ -1,3 +1,8 @@
+[B]Update - v6.7.87.2 (oshanrube fork)[/B]
+--[Fix] Picking a source while a previous video is still stuck in Kodi's player no longer hangs: the old video is stopped first.
+--[Fix] Resolving dialog shows "Link ready - starting playback" at hand-off instead of freezing on the last step.
+--[Fix] Progress window closes with a notice if playback never starts, and before the resume prompt.
+
 [B]Update - v6.7.87.1 (oshanrube fork)[/B]
 --[Fix] Source resolve no longer stalls or drops working sources after picking from the source list.
 --[New] Resolving dialog shows each debrid step, and a report lists why sources failed.
