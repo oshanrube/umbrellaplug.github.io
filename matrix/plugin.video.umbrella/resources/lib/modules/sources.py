@@ -436,7 +436,7 @@ class Sources:
 	def resolveLabel(self, attempt, meta, running):
 		item, resolve_index = attempt.item, attempt.index
 		src_provider = resolve_tracker.describe(item)
-		status = '%s  (%ds)' % (attempt.status, int(attempt.elapsed))
+		status = attempt.status if attempt.finished else '%s  (%ds)' % (attempt.status, int(attempt.elapsed))
 		if running > 1: status += '  [+%d slower source%s still trying]' % (running - 1, 's' if running > 2 else '')
 		if getSetting('progress.dialog') == '0' and getSetting('dialogs.useumbrelladialog') == 'true':
 			return '[COLOR %s]%s[CR]%s[CR]%s[/COLOR][CR]%s' % (self.highlight_color, src_provider.upper(), item['provider'].upper(), item['info'], status)
@@ -445,6 +445,30 @@ class Sources:
 			plotLabel = '[COLOR %s]%s[/COLOR][CR][CR]' % (getSetting('sources.highlight.color'), meta.get('plot')) if meta.get('plot') else ''
 			return plotLabel + '[COLOR %s]%s[CR]%s[CR]%s[CR]%s[CR]%02d - %s[/COLOR][CR]%s' % (self.highlight_color, src_provider.upper(), item['provider'].upper(), item['quality'].upper(), resolveInfo, resolve_index, item['name'][:30], status)
 		return '[COLOR %s]%s  |  %02d - %s  |  %s GB[/COLOR][CR]%s' % (self.highlight_color, src_provider.upper(), resolve_index, item['name'], round(item['size'], 2), status)
+
+	def stopStalePlayback(self, progressDialog, winner, meta):
+		"""A video still open in Kodi's player (e.g. hung after a failed seek) stops the new source from starting, and
+		Player.keepAlive() then mistakes it for the new playback and waits on it, leaving the progress window up. Stop it
+		before the new Player instance exists, so its stop callbacks cannot reach that instance either.
+		Play-next transitions are left alone, Kodi moves to the next playlist item itself."""
+		if playerWindow.getProperty('umbrella.playnext.transition') == 'true': return True
+		try: busy = control.player.isPlaying()
+		except: busy = False
+		if not busy: return True
+		log_utils.log('Previous playback still open in Kodi player, stopping it before starting the new source', level=log_utils.LOGWARNING)
+		control.player.stop()
+		for i in range(50): # 10 seconds
+			try: busy = control.player.isPlaying()
+			except: busy = False
+			if not busy:
+				control.sleep(500) # let the previous playback's onPlayBackStopped() clean up (it clears the playlist) before the hand-off
+				return True
+			winner.status = 'Stopping previous video in Kodi player (%ds)' % (i // 5)
+			try: progressDialog.update(100, self.resolveLabel(winner, meta, 0))
+			except: pass
+			control.sleep(200)
+		log_utils.log('Previous playback did not stop within 10s, not starting the new source', level=log_utils.LOGWARNING)
+		return False
 
 	def playItem(self, title, items, chosen_source, meta):
 		try:
@@ -506,6 +530,15 @@ class Sources:
 				if winner is not runner.attempts[0]:
 					first = runner.attempts[0]
 					control.notification(title='Source #%02d failed' % first.index, message='%s -> playing #%02d' % (first.reason or first.status, winner.index))
+				winner.status = 'Link ready via %s in %.1fs - starting playback' % (resolve_tracker.describe(winner.item), winner.elapsed)
+				try: progressDialog.update(100, self.resolveLabel(winner, meta, 0))
+				except: pass
+				if not self.stopStalePlayback(progressDialog, winner, meta):
+					try: progressDialog.close()
+					except: pass
+					del progressDialog
+					control.okDialog(title='Playback blocked', message='Kodi is still stuck on the previous video and did not stop. Wait a moment and try again, or restart Kodi if it persists.')
+					return control.cancelPlayback()
 				if homeWindow.getProperty('umbrella.window_keep_alive') != 'true':
 					try: progressDialog.close()
 					except: pass
