@@ -13,6 +13,7 @@ from urllib.parse import quote_plus
 from resources.lib.database import cache
 from resources.lib.modules import control
 from resources.lib.modules import log_utils
+from resources.lib.modules import resolve_tracker
 from resources.lib.modules import string_tools
 from resources.lib.modules.source_utils import supported_video_extensions
 
@@ -425,14 +426,18 @@ class AllDebrid:
 	def resolve_magnet(self, magnet_url, info_hash, season, episode, ep_title):
 		from resources.lib.modules.source_utils import seas_ep_filter, extras_filter
 		try:
-			failed_reason, media_id, file_url = 'Unknown', None, None
+			failed_reason, media_id, file_url, transfer_id = 'Unknown', None, None, None
 			correct_files = []
 			append = correct_files.append
 			extensions = supported_video_extensions()
 			extras_filtering_list = extras_filter()
+			resolve_tracker.report('Adding magnet to AllDebrid')
 			transfer_id = self.create_transfer(magnet_url)
+			resolve_tracker.report('Reading file list from AllDebrid')
 			transfer_info = self.list_transfer(transfer_id)
-			if not transfer_info: return log_utils.log('AllDebrid: Error RESOLVE MAGNET "%s" : (Server Failed to respond)' % magnet_url, __name__, log_utils.LOGWARNING)
+			if not transfer_info:
+				resolve_tracker.fail('AllDebrid returned no files (not cached or no response)')
+				return log_utils.log('AllDebrid: Error RESOLVE MAGNET "%s" : (Server Failed to respond)' % magnet_url, __name__, log_utils.LOGWARNING)
 			#filenames = [i.get('filename') for i in transfer_info.get('links')]
 			filenames = [i.get('n') for i in transfer_info.get('files', [])]
 			if all(i.lower().endswith('.rar') for i in filenames): failed_reason = 'AD returned unsupported .rar file'
@@ -459,6 +464,7 @@ class AllDebrid:
 			if season:
 				correct_files = []
 				append = correct_files.append
+				resolve_tracker.report('Matching season %s episode %s against %d files' % (season, episode, len(valid_results)))
 
 				for item in valid_results:
 					name = item.get('n', '')
@@ -500,13 +506,17 @@ class AllDebrid:
 				media_id = max(valid_results, key=lambda x: x.get('s')).get('l', None)
 			if not self.store_to_cloud: self.delete_transfer(transfer_id)
 			if not media_id:
+				resolve_tracker.fail(failed_reason if failed_reason != 'Unknown' else 'No suitable video file in torrent')
 				log_utils.log('AllDebrid: FAILED TO RESOLVE MAGNET "%s" : (%s)' % (magnet_url, failed_reason), __name__, log_utils.LOGWARNING)
 				return None
+			resolve_tracker.report('Unrestricting AllDebrid link')
 			file_url = self.unrestrict_link(media_id)
 			if not file_url:
+				resolve_tracker.fail('AllDebrid failed to unrestrict the link')
 				log_utils.log('AllDebrid: FAILED TO UNRESTRICT MAGNET "%s" ' % magnet_url, __name__, log_utils.LOGWARNING)
 			return file_url
 		except:
+			if failed_reason != 'Unknown': resolve_tracker.fail(failed_reason)
 			if failed_reason != 'Unknown': log_utils.log('AllDebrid: FAILED TO RESOLVE MAGNET "%s" : (%s)' % (magnet_url, failed_reason), __name__, log_utils.LOGWARNING)
 			else: log_utils.error('AllDebrid: Error RESOLVE MAGNET %s : ' % magnet_url)
 			if transfer_id: self.delete_transfer(transfer_id)

@@ -16,6 +16,7 @@ from resources.lib.modules import cleandate
 from resources.lib.modules import control
 from resources.lib.modules import debrid
 from resources.lib.modules import log_utils
+from resources.lib.modules import resolve_tracker
 from resources.lib.modules import string_tools
 from resources.lib.modules.source_utils import supported_video_extensions, getFileType, aliases_check
 from resources.lib.cloud_scrapers import cloudSources
@@ -420,24 +421,38 @@ class Sources:
 			log_utils.error('Error sourceSelect(): ')
 			control.cancelPlayback()
 
+	def resolveQueue(self, items, chosen_source):
+		"""Chosen source first, then the sources ranked after it, wrapping round to the top of the list.
+		Each source appears once, 41 at most. Returns [(1-based list position, source)]."""
+		chosen = jsloads(chosen_source)[0]
+		try: source_index = items.index(chosen)
+		except ValueError: # json round-trip can alter values, fall back to matching on url
+			source_index = next((idx for idx, i in enumerate(items) if i.get('url') == chosen.get('url')), None)
+			if source_index is None: return [(0, chosen)]
+		if getSetting('sources.useonlyone') == 'true': return [(source_index + 1, items[source_index])]
+		order = list(range(source_index, len(items))) + list(range(0, source_index))
+		return [(idx + 1, items[idx]) for idx in order[:41]]
+
+	def resolveLabel(self, attempt, meta, running):
+		item, resolve_index = attempt.item, attempt.index
+		src_provider = resolve_tracker.describe(item)
+		status = '%s  (%ds)' % (attempt.status, int(attempt.elapsed))
+		if running > 1: status += '  [+%d slower source%s still trying]' % (running - 1, 's' if running > 2 else '')
+		if getSetting('progress.dialog') == '0' and getSetting('dialogs.useumbrelladialog') == 'true':
+			return '[COLOR %s]%s[CR]%s[CR]%s[/COLOR][CR]%s' % (self.highlight_color, src_provider.upper(), item['provider'].upper(), item['info'], status)
+		elif getSetting('progress.dialog') == '2':
+			resolveInfo = item['info'].replace('/',' ')
+			plotLabel = '[COLOR %s]%s[/COLOR][CR][CR]' % (getSetting('sources.highlight.color'), meta.get('plot')) if meta.get('plot') else ''
+			return plotLabel + '[COLOR %s]%s[CR]%s[CR]%s[CR]%s[CR]%02d - %s[/COLOR][CR]%s' % (self.highlight_color, src_provider.upper(), item['provider'].upper(), item['quality'].upper(), resolveInfo, resolve_index, item['name'][:30], status)
+		return '[COLOR %s]%s  |  %02d - %s  |  %s GB[/COLOR][CR]%s' % (self.highlight_color, src_provider.upper(), resolve_index, item['name'], round(item['size'], 2), status)
+
 	def playItem(self, title, items, chosen_source, meta):
 		try:
 			try: items = jsloads(items)
 			except: pass
 			try: meta = jsloads(meta)
 			except: pass
-			try:
-				chosen_source = jsloads(chosen_source)
-				source_index = items.index(chosen_source[0])
-				source_len = len(items)
-				next_end = min(source_len, source_index+41)
-				sources_next = items[source_index+1:next_end]
-				sources_prev = [] if next_end < source_len else items[0:41-(source_len-source_index)]
-				if getSetting('sources.useonlyone')== 'true':
-					resolve_items = chosen_source
-				else:
-					resolve_items = [i for i in chosen_source + sources_next + sources_prev]
-			except: log_utils.error()
+			resolve_items = self.resolveQueue(items, chosen_source)
 			try:
 				poster = meta.get('poster')
 			except:
@@ -460,71 +475,63 @@ class Sources:
 				homeWindow.clearProperty('umbrella.window_keep_alive')
 				progressDialog = control.progressDialogBG
 				progressDialog.create(header, '')
-			for i in range(len(resolve_items)):
-				try:
-					resolve_index = items.index(resolve_items[i])+1
-					src_provider = resolve_items[i]['debrid'] if resolve_items[i].get('debrid') else ('%s - %s' % (resolve_items[i]['source'], resolve_items[i]['provider']))
-					if getSetting('progress.dialog') == '0':
-						if getSetting('dialogs.useumbrelladialog') == 'true':
-							label = '[COLOR %s]%s[CR]%s[CR]%s[/COLOR]' % (self.highlight_color, src_provider.upper(), resolve_items[i]['provider'].upper(), resolve_items[i]['info'])
-						else:
-							label = '[COLOR %s]%s[CR]%02d - %s[CR]%s[/COLOR]' % (self.highlight_color, src_provider.upper(), resolve_index, resolve_items[i]['name'], str(round(resolve_items[i]['size'], 2)) + ' GB') # using "[CR]" has some weird delay with progressDialog.update() at times
-					elif getSetting('progress.dialog') == '2':
-						resolveInfo = resolve_items[i]['info'].replace('/',' ')
-						if meta.get('plot'):
-							plotLabel = '[COLOR %s]%s[/COLOR][CR][CR]' %  (getSetting('sources.highlight.color'),meta.get('plot'))
-						else:
-							plotLabel = ''
-						label = plotLabel + '[COLOR %s]%s[CR]%s[CR]%s[CR]%s[CR]%02d - %s[/COLOR]' % (self.highlight_color, src_provider.upper(), resolve_items[i]['provider'].upper(), resolve_items[i]['quality'].upper(), resolveInfo, resolve_index, resolve_items[i]['name'][:30])
-					else:
-						label = '[COLOR %s]%s[CR]%02d - %s[CR]%s[/COLOR]' % (self.highlight_color, src_provider.upper(), resolve_index, resolve_items[i]['name'], str(round(resolve_items[i]['size'], 2)) + ' GB') # using "[CR]" has some weird delay with progressDialog.update() at times
-					control.sleep(100)
-					try:
-						if progressDialog.iscanceled(): break
-						progressDialog.update(int((100 / float(len(resolve_items))) * i), label)
-					except: 
-						progressDialog.update(int((100 / float(len(resolve_items))) * i), '[COLOR %s]Resolving...[/COLOR]%s' % (self.highlight_color, resolve_items[i]['name']))
-					w = Thread(target=self.sourcesResolve, args=(resolve_items[i],))
-					w.start()
-					for x in range(40):
-						try:
-							if control.monitor.abortRequested(): return sysexit()
-							if progressDialog.iscanceled():
-								control.notification(message=32398)
-								control.cancelPlayback()
-								progressDialog.close()
-								del progressDialog
-								return
-						except: pass
-						if not w.is_alive(): break
-						control.sleep(200)
-					if not self.url: continue
-					# if not any(x in self.url.lower() for x in video_extensions):
-					if not any(x in self.url.lower() for x in video_extensions) and 'plex.direct:' not in self.url and 'torbox' not in self.url and 'tb-cdn' not in self.url and 'plugin://plugin.video.composite_for_plex' not in self.url:
-						log_utils.log('Playback not supported for (playItem()): %s' % self.url, level=log_utils.LOGWARNING)
-						continue
-					if homeWindow.getProperty('umbrella.window_keep_alive') != 'true':
-						try: progressDialog.close()
-						except: pass
-						del progressDialog
-					from resources.lib.modules import player
-					player.Player().play_source(
-						title,
-						getattr(self, 'year', meta.get('year') if isinstance(meta, dict) else None),
-						getattr(self, 'season', meta.get('season') if isinstance(meta, dict) else None),
-						getattr(self, 'episode', meta.get('episode') if isinstance(meta, dict) else None),
-						getattr(self, 'imdb', meta.get('imdb', '') if isinstance(meta, dict) else ''),
-						getattr(self, 'tmdb', meta.get('tmdb', '') if isinstance(meta, dict) else ''),
-						getattr(self, 'tvdb', meta.get('tvdb', '') if isinstance(meta, dict) else ''),
-						self.url, meta
-					)
-					return self.url
-				except: log_utils.error()
+			# Each source resolves in its own thread with its own result. The old loop waited 8s per source, then moved on
+			# while the thread kept running, so a slow but successful resolve was lost (or overwritten via the shared self.url).
+			runner = resolve_tracker.ResolveRunner(resolve_items, self.sourcesResolve, lambda url: resolve_tracker.is_playable_url(url, video_extensions))
+			winner = None
+			while True:
+				if control.monitor.abortRequested():
+					runner.abandon_all()
+					return sysexit()
+				try: canceled = progressDialog.iscanceled()
+				except: canceled = False
+				if canceled:
+					runner.abandon_all()
+					control.notification(message=32398)
+					control.cancelPlayback()
+					try: progressDialog.close()
+					except: pass
+					del progressDialog
+					return
+				winner = runner.poll()
+				if winner or runner.exhausted: break
+				current = runner.current
+				if current:
+					try: progressDialog.update(runner.percent, self.resolveLabel(current, meta, len(runner.pending)))
+					except: log_utils.error()
+				control.sleep(200)
+			log_utils.log('Resolve summary:\n%s' % runner.summary(), level=log_utils.LOGINFO)
+			if winner:
+				self.url = winner.url
+				if winner is not runner.attempts[0]:
+					first = runner.attempts[0]
+					control.notification(title='Source #%02d failed' % first.index, message='%s -> playing #%02d' % (first.reason or first.status, winner.index))
+				if homeWindow.getProperty('umbrella.window_keep_alive') != 'true':
+					try: progressDialog.close()
+					except: pass
+					del progressDialog
+				from resources.lib.modules import player
+				player.Player().play_source(
+					title,
+					getattr(self, 'year', meta.get('year') if isinstance(meta, dict) else None),
+					getattr(self, 'season', meta.get('season') if isinstance(meta, dict) else None),
+					getattr(self, 'episode', meta.get('episode') if isinstance(meta, dict) else None),
+					getattr(self, 'imdb', meta.get('imdb', '') if isinstance(meta, dict) else ''),
+					getattr(self, 'tmdb', meta.get('tmdb', '') if isinstance(meta, dict) else ''),
+					getattr(self, 'tvdb', meta.get('tvdb', '') if isinstance(meta, dict) else ''),
+					winner.url, meta
+				)
+				return winner.url
 			try: progressDialog.close()
 			except: pass
 			del progressDialog
+			homeWindow.clearProperty('umbrella.window_keep_alive')
+			control.hide()
+			control.dialog.textviewer('No source could be played', runner.summary())
 			self.errorForSources()
-		except: log_utils.error('Error playItem: ')
+		except:
+			log_utils.error('Error playItem: ')
+			control.cancelPlayback()
 
 	def getSources(self, title, year, imdb, tmdb, tvdb, season, episode, tvshowtitle, premiered, meta=None, preScrape=False):
 		self.window = None
@@ -1421,7 +1428,9 @@ class Sources:
 			debrid_provider = item['debrid'] if item.get('debrid') else ''
 		except: log_utils.error()
 		if 'magnet:' in url:
-			if not 'uncached' in item['source']:
+			if 'uncached' in item['source']:
+				resolve_tracker.fail('Uncached torrent, cache it on %s first' % (debrid_provider or 'your debrid'))
+			else:
 				try:
 					meta = homeWindow.getProperty(self.metaProperty) # need for CM "download" action
 					if meta:
@@ -1443,13 +1452,17 @@ class Sources:
 					# 	from resources.lib.debrid.easydebrid import EasyDebrid as debrid_function
 					elif debrid_provider == 'TorBox':
 						from resources.lib.debrid.torbox import TorBox as debrid_function
-					else: return
-					
+					else:
+						resolve_tracker.fail('No debrid service assigned to this torrent (%s)' % (debrid_provider or 'none'))
+						return
+					resolve_tracker.report('Sending torrent to %s' % debrid_provider)
 					url = debrid_function().resolve_magnet(url, item['hash'], season, episode, title)
+					if not url: resolve_tracker.fail('%s could not resolve this torrent' % debrid_provider, overwrite=False)
 					self.url = url
 					return url
 				except:
 					log_utils.error()
+					resolve_tracker.fail('Unexpected error resolving via %s (see log)' % debrid_provider, overwrite=False)
 					return
 		else:
 			try:
@@ -1458,13 +1471,16 @@ class Sources:
 					direct_sources = ('ad_cloud', 'oc_cloud', 'pm_cloud', 'rd_cloud', 'tb_cloud')
 					if item['provider'] in direct_sources:
 						try:
+							resolve_tracker.report('Getting link from %s' % item['provider'])
 							call = [i[1] for i in self.sourceDict if i[0] == item['provider']][0]
 							url = call().resolve(url)
+							if not url: resolve_tracker.fail('%s returned no link' % item['provider'], overwrite=False)
 							self.url = url
 							return url
-						except: pass
+						except: resolve_tracker.fail('Error getting link from %s (see log)' % item['provider'], overwrite=False)
 					else:
 						if item.get('provider') == 'easynews':
+							resolve_tracker.report('Getting link from Easynews')
 							try:
 								from resources.lib.debrid.easynews import EasyNews
 								base_url = url.split('|')[0]
@@ -1486,11 +1502,17 @@ class Sources:
 						from resources.lib.debrid.alldebrid import AllDebrid as debrid_function
 					#elif debrid_provider == 'TorBox':
 					#	from resources.lib.debrid.torbox import TorBox as debrid_function
+					else:
+						resolve_tracker.fail('Hoster links are not supported for %s' % (debrid_provider or 'this source'))
+						return
+					resolve_tracker.report('Unrestricting %s link via %s' % (item.get('source', ''), debrid_provider))
 					url = debrid_function().unrestrict_link(url)
+					if not url: resolve_tracker.fail('%s could not unrestrict the %s link' % (debrid_provider, item.get('source', '')), overwrite=False)
 					self.url = url
 					return url
 			except:
 				log_utils.error()
+				resolve_tracker.fail('Unexpected error resolving link (see log)', overwrite=False)
 				return
 
 	def debridPackDialog(self, provider, name, magnet_url, info_hash):

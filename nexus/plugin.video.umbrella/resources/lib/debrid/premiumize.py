@@ -12,6 +12,7 @@ from urllib.parse import quote_plus, urlencode
 from resources.lib.database import cache
 from resources.lib.modules import control
 from resources.lib.modules import log_utils
+from resources.lib.modules import resolve_tracker
 from resources.lib.modules import string_tools
 from resources.lib.modules.source_utils import supported_video_extensions
 
@@ -211,9 +212,14 @@ class Premiumize:
 			extensions = supported_video_extensions()
 			extras_filtering_list = extras_filter()
 			data = {'src': magnet_url}
+			resolve_tracker.report('Requesting direct links from Premiumize')
 			response = self._post(transfer_directdl_url, data)
-			if not response: return log_utils.log('Premiumize.me: Error RESOLVE MAGNET "%s" : (Server Failed to respond)' % magnet_url, __name__, log_utils.LOGWARNING)
-			if not 'status' in response or response['status'] != 'success': raise Exception()
+			if not response:
+				resolve_tracker.fail('Premiumize did not respond')
+				return log_utils.log('Premiumize.me: Error RESOLVE MAGNET "%s" : (Server Failed to respond)' % magnet_url, __name__, log_utils.LOGWARNING)
+			if not 'status' in response or response['status'] != 'success':
+				resolve_tracker.fail('Premiumize: %s' % (response.get('message') or 'not cached'))
+				raise Exception()
 			# valid_results = [i for i in response.get('content') if any(i.get('path').lower().endswith(x) for x in extensions) and not i.get('link', '') == '']
 			valid_results = [i for i in response.get('content') if not any(i.get('path').lower().endswith(x) for x in invalid_extensions) and not i.get('link', '') == '']
 			if not valid_results: failed_reason = 'No valid video extension found'
@@ -239,6 +245,7 @@ class Premiumize:
 				if self.store_to_cloud: self.create_transfer(magnet_url)
 				return self.add_headers_to_url(file_url)
 			else:
+				resolve_tracker.fail(failed_reason)
 				log_utils.log('Premiumize.me: FAILED TO RESOLVE MAGNET "%s" : (%s)' % (magnet_url, failed_reason), __name__, log_utils.LOGWARNING)
 		except: log_utils.error('Premiumize.me: Error RESOLVE MAGNET "%s" ' % magnet_url)
 

@@ -14,6 +14,7 @@ from urllib.parse import quote_plus
 from resources.lib.database import cache
 from resources.lib.modules import control
 from resources.lib.modules import log_utils
+from resources.lib.modules import resolve_tracker
 from resources.lib.modules import string_tools
 from resources.lib.modules.source_utils import supported_video_extensions
 
@@ -397,6 +398,7 @@ class RealDebrid:
 	def resolve_magnet(self, magnet_url, info_hash, season, episode, title):
 		from resources.lib.modules.source_utils import seas_ep_filter, extras_filter
 		# from resources.lib.cloud_scrapers.cloud_utils import cloud_check_title # alias and title checking no longer used
+		resolve_tracker.report('Waiting for a free Real-Debrid slot')
 		with _rd_magnet_semaphore:
 			try:
 				failed_reason, torrent_id, file_url = 'Unknown', None, None
@@ -405,41 +407,53 @@ class RealDebrid:
 				info_hash = info_hash.lower()
 				compare_title = re.sub(r'[^A-Za-z0-9-]+', '.', title.replace('\'', '').replace('&', 'and').replace('%', '.percent')).lower()
 				elapsed_time, transfer_finished = 0, False
+				resolve_tracker.report('Checking Real-Debrid active torrent limit')
 				self.rd_check_max()
+				resolve_tracker.report('Adding magnet to Real-Debrid')
 				torrent_id = self.add_magnet(magnet_url)
 				if not torrent_id:
+					resolve_tracker.fail('Real-Debrid rejected the magnet (invalid, infringing or too many requests)')
 					return None
+				resolve_tracker.report('Selecting files on Real-Debrid')
 				self.add_torrent_select(torrent_id,'all')
+				resolve_tracker.report('Reading torrent info from Real-Debrid')
 				torrent_info = self.user_cloud_info_check(torrent_id)
 				if not torrent_info or not torrent_info.get('links') or 'error' in torrent_info:
+					status = torrent_info.get('status') if isinstance(torrent_info, dict) else None
+					resolve_tracker.fail('Not cached on Real-Debrid (status: %s)' % (status or 'no response'))
 					self.delete_torrent(torrent_id)
 					return None
 				control.sleep(1000)
 				while elapsed_time <= 4 and not transfer_finished:
+					resolve_tracker.report('Checking Real-Debrid transfer is complete (%d/5)' % (elapsed_time + 1))
 					active_count = self.torrents_activeCount()
 					active_list = active_count['list']
 					elapsed_time += 1
 					if info_hash in active_list: control.sleep(1000)
 					else: transfer_finished = True
 				if not transfer_finished:
+					resolve_tracker.fail('Not cached on Real-Debrid (still downloading)')
 					self.delete_torrent(torrent_id)
 					return None
 				selected_files = [(idx, i) for idx, i in enumerate([i for i in torrent_info['files'] if i['selected'] == 1]) if i['path'].lower().endswith(tuple(extensions))]
 				selected_files = sorted(selected_files, key=lambda x: x[1]['bytes'], reverse=True)
 				match = False
-				if season:
+				if not selected_files: failed_reason = 'No video files in torrent'
+				elif season:
 					correct_files = []
 					correct_file_check = False
 					for value in selected_files:
 						correct_file_check = seas_ep_filter(season, episode, value[1]['path'])
 						if correct_file_check: correct_files.append(value[1]); break
-					if len(correct_files) == 0: match = False
+					if len(correct_files) == 0:
+						match, failed_reason = False, 'No file for season %s episode %s in torrent' % (season, episode)
 					else:
 						for i in correct_files:
 							compare_link = seas_ep_filter(season, episode, i['path'], split=True)
 							compare_link = re.sub(compare_title, '', compare_link)
 							if any(x in compare_link for x in extras_filtering_list): continue
 							else: match = True; break
+						if not match: failed_reason = 'Episode file looks like an extra/sample'
 					if match: index = [i[0] for i in selected_files if i[1]['path'] == correct_files[0]['path']][0]
 				else:
 					for value in selected_files:
@@ -447,22 +461,22 @@ class RealDebrid:
 						filename_info = filename.replace(compare_title, '')
 						if any(x in filename_info for x in extras_filtering_list): continue
 						match, index = True, value[0]; break
+					if not match: failed_reason = 'Only extras/samples in torrent'
 				if match:
+					resolve_tracker.report('Unrestricting Real-Debrid link')
 					rd_link = torrent_info['links'][index]
 					file_url = self.unrestrict_link(rd_link)
-					if file_url.endswith('rar'):
+					if not file_url:
+						failed_reason = 'Real-Debrid failed to unrestrict the link'
+					elif file_url.endswith('rar'):
 						file_url, failed_reason = None, 'RD returned unsupported .rar file --> %s' % file_url
-					try:
-						if not any(file_url.lower().endswith(x) for x in extensions):
-							file_url, failed_reason = None, 'RD returned unsupported file extension --> %s' % file_url
-					except:
-							file_url, failed_reason = None, 'RD returned unsupported file extension or error getting file extension.'
-					if not self.store_to_cloud: self.delete_torrent(torrent_id)
-				else:
-					self.delete_torrent(torrent_id)
+					elif not any(file_url.lower().endswith(x) for x in extensions):
+						file_url, failed_reason = None, 'RD returned unsupported file extension --> %s' % file_url
 				if not file_url:
+					resolve_tracker.fail(failed_reason)
 					log_utils.log('Real-Debrid: FAILED TO RESOLVE MAGNET "%s" : (%s)' % (magnet_url, failed_reason), __name__, log_utils.LOGWARNING)
 					self.delete_torrent(torrent_id)
+				elif not self.store_to_cloud: self.delete_torrent(torrent_id)
 				return file_url
 			except:
 				log_utils.error('Real-Debrid: Error RESOLVE MAGNET "%s" ' % magnet_url)
