@@ -1,4 +1,4 @@
-<addon id="plugin.video.umbrella" name="Umbrella" provider-name="Umbrella" version="6.7.87">
+<addon id="plugin.video.umbrella" name="Umbrella" provider-name="Umbrella" version="6.7.87.1">
 	<requires>
 		<import addon="xbmc.python" version="3.0.0" />
 		<import addon="script.module.requests" />
@@ -261,6 +261,10 @@
 			<screenshot>resources/screenshots/screenshot003.jpg</screenshot>
 		</assets>
 		<news>
+[B]Update - v6.7.87.1 (oshanrube fork)[/B]
+--[Fix] Source resolve no longer stalls or drops working sources after picking from the source list.
+--[New] Resolving dialog shows each debrid step, and a report lists why sources failed.
+
 [B]Update - v6.7.87 - Sept 9th, 2026 [/B]
 --[Fix] Removed guard for scrobble in first 3 minutes so immediate stops no longer continue to show as playing.
 --[Fix] Fix for progress episodes refreshing episodes with duplicates or none.
