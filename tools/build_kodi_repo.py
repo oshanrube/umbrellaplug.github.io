@@ -46,7 +46,8 @@ def addon_entry(src):
 
 
 def build_zip(src, addon_id, dest):
-	archive = tarfile.open(fileobj=io.BytesIO(git('archive', '--format=tar', 'HEAD', src)))
+	# git archive applies core.autocrlf, which would turn LF files into CRLF on Windows checkouts
+	archive = tarfile.open(fileobj=io.BytesIO(git('-c', 'core.autocrlf=false', '-c', 'core.eol=lf', 'archive', '--format=tar', 'HEAD', src)))
 	with zipfile.ZipFile(dest, 'w', zipfile.ZIP_DEFLATED) as zf:
 		for member in archive.getmembers():
 			if not member.isfile(): continue
